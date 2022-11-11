@@ -36,12 +36,15 @@ def load_data():
     # Load documents
     newsgroups_train = fetch_20newsgroups(subset="train")
     print(len(newsgroups_train.data), " documents loaded.")
+    newsgroups_test = fetch_20newsgroups(subset="test")
+    print(len(newsgroups_test.data), " testing documents loaded.")
 
     print("Example document:")
     print(newsgroups_train.data[0])
 
     # Preprocess documents - lemmatization and stemming
     processed_docs = list(map(preprocess, newsgroups_train.data))
+    processed_docs_test = list(map(preprocess, newsgroups_test.data))
 
     print("Example document - lemmatized and stemmed:")
     print(processed_docs[0])
@@ -51,22 +54,22 @@ def load_data():
     dictionary = gensim.corpora.Dictionary(processed_docs)
     dictionary.filter_extremes(no_below=15, no_above=0.5, keep_n=100000)
 
-    print("Dictionary sizde: ", len(dictionary))
+    print("Dictionary size: ", len(dictionary))
 
     # Filter words in documents
+    def _filter_docs(processed_docs):
+        docs = []
+        for doc in processed_docs:
+            docs.append(list(filter(lambda x: x != -1, dictionary.doc2idx(doc))))
+        return docs
 
-    docs = []
-    maxdoclen = 0
-    for doc in processed_docs:
-        docs.append(list(filter(lambda x: x != -1, dictionary.doc2idx(doc))))
-        maxdoclen = max(maxdoclen, len(docs[-1]))
+    docs = _filter_docs(processed_docs)
+    docs_test = _filter_docs(processed_docs_test)
 
     print("Example document - filtered:")
     print(docs[0])
 
-    print("Maximum document length:", maxdoclen)
-
-    return docs, dictionary
+    return docs, docs_test, dictionary
 
 
 def compute_counts(z_nd, docs, wrd_cnt, topics):
@@ -186,6 +189,38 @@ class LDATopicModel:
             self.z_nd, self.docs, self.wrd_cnt, self.topics
         )
 
+    def assign_topics(self, docs, iterations):
+        z_nd = init_random_topics(docs, self.topics)
+        c_d, _, _ = compute_counts(z_nd, docs, self.wrd_cnt, self.topics)
+        doc_cnt = len(docs)
+
+        for it in range(iterations):
+            for d in range(doc_cnt):
+                N_d = len(docs[d])
+                for n, w in enumerate(docs[d]):
+                    k = z_nd[d][n]
+                    # remove word from count
+                    c_d[d][k] -= 1
+
+                    # compute probabilities
+                    p = []
+                    for k in range(self.topics):
+                        p.append(
+                            (self.alpha + c_d[d][k])
+                            * (self.gamma + self.c_w[w][k])
+                            / (self.wrd_cnt * self.gamma + self.c[k])
+                        )
+                    p_sum = sum(p)
+                    p = [x / p_sum for x in p]
+
+                    # sample new topic from distribution p
+                    k = sample_distribution(p)
+                    z_nd[d][n] = k
+
+                    # add word to counts
+                    c_d[d][k] += 1
+        return z_nd, c_d
+
     def entropy_topic(self, k):
         H_k = 0
         for w in range(self.wrd_cnt):
@@ -193,11 +228,33 @@ class LDATopicModel:
             H_k -= p * np.log2(p)
         return H_k
 
+    def entropy_data(self, docs, z_nd, c_d):
+        H = 0
+        Mgamma = self.wrd_cnt * self.gamma
+        for d in range(len(docs)):
+            for w in docs[d]:
+                N_d = len(docs[d])
+                KalphaN_d = self.topics * self.alpha + N_d
+                p = 0
+                for k in range(self.topics):
+                    p += (
+                        (self.alpha + c_d[d][k])
+                        / KalphaN_d
+                        * (self.gamma + self.c_w[w][k])
+                        / (Mgamma + self.c[k])
+                    )
+                H += np.log2(p)
+
+        N_test = sum(len(doc) for doc in docs)
+        H = -H / N_test
+
+        return H
+
     def top_words(self, k, topn=10):
         # return a list of topn words with the highest probability for topic k
         c_wk = [self.c_w[w][k] for w in range(self.wrd_cnt)]
-        words = np.argsort(c_wk)[-topn:]
-        return [self.dictionary[w] for w in words]
+        words = np.argsort(c_wk)[::-1][:topn]
+        return [(self.dictionary[w], c_wk[w]) for w in words]
 
     def step(self):
         for d in range(self.doc_cnt):
@@ -216,15 +273,13 @@ class LDATopicModel:
                     p.append(
                         (self.alpha + self.c_d[d][k])
                         * (self.gamma + self.c_w[w][k])
-                        # / self.doc_cnt * self.alpha + N_d - 1 # NOTE: this is not needed, because it is constant
+                        # / self.topics * self.alpha + N_d - 1 # NOTE: this is not needed, because it is constant
                         / (self.wrd_cnt * self.gamma + self.c[k])
                     )
                 p_sum = sum(p)
                 p = [x / p_sum for x in p]
 
                 # sample new topic from distribution p
-                # k = np.random.multinomial(1, p).argmax()
-                # k = random.randint(0, self.topics - 1)
                 k = sample_distribution(p)
                 self.z_nd[d][n] = k
 
@@ -250,26 +305,17 @@ def main():
     cache_path = "preprocessed_20newsgroups.pickle"
     if os.path.isfile(cache_path):
         with open(cache_path, "rb") as f:
-            docs, dictionary = pickle.load(f)
+            docs, docs_test, dictionary = pickle.load(f)
     else:
-        docs, dictionary = load_data()
+        docs, docs_test, dictionary = load_data()
         # save docs and dictionary to cache using pickle
         with open(cache_path, "wb") as f:
-            pickle.dump((docs, dictionary), f)
+            pickle.dump((docs, docs_test, dictionary), f)
 
     # set the hyperparameters
     topics = 20
     alpha = 0.1
     gamma = 0.1
-
-    doc_cnt = len(docs)
-    wrd_cnt = len(dictionary)
-
-    # initialize z_nd randomly for every word in every document
-    # z_nd = init_random_topics(docs, topics)
-
-    # compute initial counts
-    # c_d, c_w, c = compute_counts(z_nd, docs, wrd_cnt, topics)
 
     # latent dirichlet allocation topic model
     model = LDATopicModel(docs, dictionary, topics, alpha, gamma)
