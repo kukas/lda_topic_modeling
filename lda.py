@@ -14,6 +14,7 @@ import time
 import pickle
 import argparse
 import nltk
+from numba import njit, prange
 
 # nltk.download("wordnet")
 # nltk.download("omw-1.4")
@@ -228,27 +229,82 @@ class LDATopicModel:
             H_k -= p * np.log2(p)
         return H_k
 
-    def entropy_data(self, docs, z_nd, c_d):
+    @staticmethod
+    @njit
+    def _entropy_data(
+        docs: np.ndarray,
+        docs_lengths: np.ndarray,
+        c_w: np.ndarray,
+        c_d: np.ndarray,
+        c: np.ndarray,
+        wrd_cnt: int,
+        topics: int,
+        alpha: float,
+        gamma: float,
+    ) -> float:
         H = 0
-        Mgamma = self.wrd_cnt * self.gamma
-        for d in range(len(docs)):
-            for w in docs[d]:
-                N_d = len(docs[d])
-                KalphaN_d = self.topics * self.alpha + N_d
-                p = 0
-                for k in range(self.topics):
-                    p += (
-                        (self.alpha + c_d[d][k])
-                        / KalphaN_d
-                        * (self.gamma + self.c_w[w][k])
-                        / (Mgamma + self.c[k])
-                    )
-                H += np.log2(p)
+        Mgamma = wrd_cnt * gamma
+        N_test = len(docs)
+        word_probs = np.zeros(N_test)
+        word_idx = 0
+        for d in range(len(docs_lengths)):
+            N_d = docs_lengths[d]
+            for n in range(N_d):
+                w = docs[word_idx]
 
-        N_test = sum(len(doc) for doc in docs)
-        H = -H / N_test
+                KalphaN_d = topics * alpha + N_d
+                for k in range(topics):
+                    word_probs[word_idx] += (
+                        (alpha + c_d[d][k])
+                        / KalphaN_d
+                        * (gamma + c_w[w][k])
+                        / (Mgamma + c[k])
+                    )
+                word_idx += 1
+
+        H = -np.sum(np.log2(word_probs)) / N_test
 
         return H
+
+    def entropy_data(self, docs, c_d):
+        flat_docs = np.concatenate(docs)
+        docs_lengths = np.array([len(d) for d in docs])
+        c_w, c_d, c = np.array(self.c_w), np.array(c_d), np.array(self.c)
+        H = self._entropy_data(
+            flat_docs,
+            docs_lengths,
+            c_w,
+            c_d,
+            c,
+            self.wrd_cnt,
+            self.topics,
+            self.alpha,
+            self.gamma,
+        )
+
+        return H
+
+        # H = 0
+        # Mgamma = self.wrd_cnt * self.gamma
+        # N_test = sum(len(doc) for doc in docs)
+        # word_probs = np.zeros(N_test)
+        # word_idx = 0
+        # for d in range(len(docs)):
+        #     for w in docs[d]:
+        #         N_d = len(docs[d])
+        #         KalphaN_d = self.topics * self.alpha + N_d
+        #         for k in range(self.topics):
+        #             word_probs[word_idx] += (
+        #                 (self.alpha + c_d[d][k])
+        #                 / KalphaN_d
+        #                 * (self.gamma + self.c_w[w][k])
+        #                 / (Mgamma + self.c[k])
+        #             )
+        #         word_idx += 1
+
+        # H = -np.sum(np.log2(word_probs)) / N_test
+
+        # return H
 
     def top_words(self, k, topn=10):
         # return a list of topn words with the highest probability for topic k
