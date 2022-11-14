@@ -73,77 +73,6 @@ def load_data():
     return docs, docs_test, dictionary
 
 
-def compute_counts(z_nd, docs, wrd_cnt, topics):
-    # compute initial counts:
-    # - c_d[d][k] ... how many words in document 𝑑 are assigned to topic 𝑘.
-    # - c_w[m][k] ... how many times the word 𝑚 is assigned to topic 𝑘 (across all documents).
-    # - c[k] ... how many words are assigned to topic 𝑘 (across all documents).
-
-    doc_cnt = len(docs)
-
-    c_d = []
-    for d in range(doc_cnt):
-        c_d.append([0] * topics)
-        for k in z_nd[d]:
-            c_d[d][k] += 1
-
-            # check if k is in range
-            assert k >= 0 and k < topics
-
-    c_w = []
-    for m in range(wrd_cnt):
-        c_w.append([0] * topics)
-
-    for d in range(doc_cnt):
-        for w, k in zip(docs[d], z_nd[d]):
-            c_w[w][k] += 1
-
-    c = [0] * topics
-    for d in range(doc_cnt):
-        for k in z_nd[d]:
-            c[k] += 1
-
-    return c_d, c_w, c
-
-
-def test_compute_counts():
-    docs = [[1, 0, 3], [4, 5], [1], [0, 3, 4, 4]]
-    z_nd = [[1, 1, 2], [2, 2], [0], [0, 1, 2, 2]]
-    topics = 3
-    wrd_cnt = 6
-    c_d, c_w, c = compute_counts(z_nd, docs, wrd_cnt, topics)
-    assert c_d == [[0, 2, 1], [0, 0, 2], [1, 0, 0], [1, 1, 2]]
-    assert c_w == [[1, 1, 0], [1, 1, 0], [0, 0, 0], [0, 1, 1], [0, 0, 3], [0, 0, 1]]
-    assert c == [2, 3, 5]
-
-
-test_compute_counts()
-
-
-def init_random_topics(docs, topics):
-    doc_cnt = len(docs)
-
-    z_nd = []
-    for d in range(doc_cnt):
-        z_nd.append([])
-        for w in docs[d]:
-            z_nd[-1].append(random.randint(0, topics - 1))
-    return z_nd
-
-
-def test_init_random_topics():
-    docs = [[1, 2, 3], [4, 5]]
-    topics = 3
-    z_nd = init_random_topics(docs, topics)
-    assert len(z_nd) == 2
-    assert len(z_nd[0]) == 3
-    assert len(z_nd[1]) == 2
-    assert all([k in range(topics) for k in z_nd[0]])
-    assert all([k in range(topics) for k in z_nd[1]])
-
-
-test_init_random_topics()
-
 # from https://stackoverflow.com/questions/18622781/why-is-numpy-random-choice-so-slow
 @njit
 def sample_distribution(probs: np.ndarray) -> int:
@@ -163,7 +92,7 @@ def set_seed(seed):
 
 
 class LDATopicModel:
-    def __init__(self, docs, dictionary, topics, alpha, gamma):
+    def __init__(self, docs, dictionary, topics, alpha, gamma, compute_z_nd=True):
         self.flat_docs = np.concatenate(docs)
         self.docs_lengths = np.array([len(d) for d in docs])
         self.docs_offsets = np.cumsum(self.docs_lengths)
@@ -175,8 +104,11 @@ class LDATopicModel:
         self.doc_cnt = len(docs)
         self.wrd_cnt = len(dictionary)
 
-        self.flat_z_nd = self.init_random_topics(self.flat_docs, self.topics)
-        self.c_d, self.c_w, self.c = self.compute_counts()
+        if compute_z_nd:
+            self.flat_z_nd = self.init_random_topics(self.flat_docs, self.topics)
+            self.c_d, self.c_w, self.c = self.compute_counts(
+                self.flat_z_nd, self.flat_docs, self.docs_lengths
+            )
 
     @property
     def z_nd(self):
@@ -189,32 +121,48 @@ class LDATopicModel:
     def init_random_topics(self, flat_docs, topics):
         return np.random.randint(0, topics, len(flat_docs))
 
-    def compute_counts(self):
+    @staticmethod
+    @njit
+    def _compute_counts(flat_z_nd, flat_docs, docs_lengths, topics, wrd_cnt):
+        doc_cnt = len(docs_lengths)
+
+        c_d = np.zeros((doc_cnt, topics))
+        word_idx = 0
+        for d in range(doc_cnt):
+            for n in range(docs_lengths[d]):
+                k = flat_z_nd[word_idx]
+                c_d[d][k] += 1
+
+                # check if k is in range
+                assert k >= 0 and k < topics
+
+                word_idx += 1
+
+        c_w = np.zeros((wrd_cnt, topics))
+        word_idx = 0
+        for d in range(doc_cnt):
+            for n in range(docs_lengths[d]):
+                w = flat_docs[word_idx]
+                k = flat_z_nd[word_idx]
+                c_w[w][k] += 1
+
+                word_idx += 1
+
+        c = np.zeros(topics)
+        for k in flat_z_nd:
+            c[k] += 1
+
+        return c_d, c_w, c
+
+    def compute_counts(self, flat_z_nd, flat_docs, docs_lengths):
         # compute initial counts:
         # - c_d[d][k] ... how many words in document 𝑑 are assigned to topic 𝑘.
         # - c_w[m][k] ... how many times the word 𝑚 is assigned to topic 𝑘 (across all documents).
         # - c[k] ... how many words are assigned to topic 𝑘 (across all documents).
 
-        z_nd = self.z_nd
-        docs = self.docs
-
-        c_d = np.zeros((self.doc_cnt, self.topics))
-        for d in range(self.doc_cnt):
-            for k in z_nd[d]:
-                c_d[d][k] += 1
-
-                # check if k is in range
-                assert k >= 0 and k < self.topics
-
-        c_w = np.zeros((self.wrd_cnt, self.topics))
-        for d in range(self.doc_cnt):
-            for w, k in zip(docs[d], z_nd[d]):
-                c_w[w][k] += 1
-
-        c = np.zeros(self.topics)
-        for k in self.flat_z_nd:
-            c[k] += 1
-
+        c_d, c_w, c = LDATopicModel._compute_counts(
+            flat_z_nd, flat_docs, docs_lengths, self.topics, self.wrd_cnt
+        )
         return c_d, c_w, c
 
     def save(self, filename):
@@ -228,52 +176,64 @@ class LDATopicModel:
             self.flat_z_nd = np.array(flat_z_nd)
 
         # check if the loaded z_nd is valid
-        assert len(self.flat_z_nd) == len(self.flat_docs)
-        assert all([k in range(self.topics) for k in self.flat_z_nd])
+        # assert len(self.flat_z_nd) == len(self.flat_docs)
+        # assert all([k in range(self.topics) for k in self.flat_z_nd])
 
-        # recompute counts
-        self.c_d, self.c_w, self.c = self.compute_counts()
+        # # recompute counts
+        self.c_d, self.c_w, self.c = self.compute_counts(
+            self.flat_z_nd, self.flat_docs, self.docs_lengths
+        )
 
-    # TODO: implement using Numba
     def assign_topics(self, docs, iterations):
-        raise NotImplementedError
-        # z_nd = init_random_topics(docs, self.topics)
-        # c_d, _, _ = compute_counts(z_nd, docs, self.wrd_cnt, self.topics)
-        # doc_cnt = len(docs)
+        flat_docs = np.concatenate(docs)
+        docs_lengths = np.array([len(d) for d in docs])
+        docs_offsets = np.cumsum(docs_lengths)
 
-        # for it in range(iterations):
-        #     for d in range(doc_cnt):
-        #         N_d = len(docs[d])
-        #         for n, w in enumerate(docs[d]):
-        #             k = z_nd[d][n]
-        #             # remove word from count
-        #             c_d[d][k] -= 1
+        flat_z_nd = self.init_random_topics(flat_docs, self.topics)
+        # z_nd = np.split(flat_z_nd, docs_offsets)
 
-        #             # compute probabilities
-        #             p = []
-        #             for k in range(self.topics):
-        #                 p.append(
-        #                     (self.alpha + c_d[d][k])
-        #                     * (self.gamma + self.c_w[w][k])
-        #                     / (self.wrd_cnt * self.gamma + self.c[k])
-        #                 )
-        #             p_sum = sum(p)
-        #             p = [x / p_sum for x in p]
+        c_d, _, _ = self.compute_counts(flat_z_nd, flat_docs, docs_lengths)
+        for it in range(iterations):
+            LDATopicModel._step(
+                flat_docs,
+                flat_z_nd,
+                docs_lengths,
+                self.c_w,
+                c_d,
+                self.c,
+                self.wrd_cnt,
+                self.topics,
+                self.alpha,
+                self.gamma,
+                True,
+            )
+        return flat_docs, docs_lengths, c_d
+        # LDATopicModel._assign_topics(
+        #     flat_docs,
+        #     flat_z_nd,
+        #     docs_lengths,
+        #     self.c_w,
+        #     c_d,
+        #     self.c,
+        #     self.wrd_cnt,
+        #     self.topics,
+        #     self.alpha,
+        #     self.gamma,
+        # )
 
-        #             # sample new topic from distribution p
-        #             k = sample_distribution(p)
-        #             z_nd[d][n] = k
-
-        #             # add word to counts
-        #             c_d[d][k] += 1
-        # return z_nd, c_d
-
-    def entropy_topic(self, k):
+    @staticmethod
+    @njit
+    def _entropy_topic(c_w, c, gamma, wrd_cnt, k):
         H_k = 0
-        for w in range(self.wrd_cnt):
-            p = (self.gamma + self.c_w[w][k]) / (self.wrd_cnt * self.gamma + self.c[k])
+        for w in range(wrd_cnt):
+            p = (gamma + c_w[w][k]) / (wrd_cnt * gamma + c[k])
             H_k -= p * np.log2(p)
         return H_k
+
+    def entropy_topic(self, k):
+        return LDATopicModel._entropy_topic(
+            self.c_w, self.c, self.gamma, self.wrd_cnt, k
+        )
 
     @staticmethod
     @njit
@@ -312,10 +272,10 @@ class LDATopicModel:
 
         return H
 
-    def entropy_data(self, docs, c_d):
+    def entropy_data(self, flat_docs, docs_lengths, c_d):
         H = LDATopicModel._entropy_data(
-            self.flat_docs,
-            self.docs_lengths,
+            flat_docs,
+            docs_lengths,
             self.c_w,
             c_d,
             self.c,
@@ -342,24 +302,24 @@ class LDATopicModel:
         c_w: np.ndarray,
         c_d: np.ndarray,
         c: np.ndarray,
-        doc_cnt: int,
         wrd_cnt: int,
         topics: int,
         alpha: float,
         gamma: float,
+        recompute_c_d_only: bool,
     ) -> None:
         word_idx = 0
         # prepare p
         p = np.zeros(topics)
-        for d in range(doc_cnt):
-            N_d = docs_lengths[d]
+        for d, N_d in enumerate(docs_lengths):
             for n in range(N_d):
                 w = flat_docs[word_idx]
                 # remove word from counts
                 k = flat_z_nd[word_idx]
                 c_d[d][k] -= 1
-                c_w[w][k] -= 1
-                c[k] -= 1
+                if not recompute_c_d_only:
+                    c_w[w][k] -= 1
+                    c[k] -= 1
 
                 # compute probabilities
                 for k in range(topics):
@@ -376,8 +336,9 @@ class LDATopicModel:
 
                 # add word to counts
                 c_d[d][k] += 1
-                c_w[w][k] += 1
-                c[k] += 1
+                if not recompute_c_d_only:
+                    c_w[w][k] += 1
+                    c[k] += 1
 
                 word_idx += 1
         assert word_idx == len(flat_docs)
@@ -390,12 +351,56 @@ class LDATopicModel:
             self.c_w,
             self.c_d,
             self.c,
-            self.doc_cnt,
             self.wrd_cnt,
             self.topics,
             self.alpha,
             self.gamma,
+            False,
         )
+
+
+def train(
+    docs, dictionary, root_dir, iterations, topics, alpha, gamma, seed, save_each=5
+):
+    # set seed for reproducibility
+    random.seed(seed)
+    np.random.seed(seed)
+    set_seed(seed)
+
+    # latent dirichlet allocation topic model
+    model = LDATopicModel(docs, dictionary, topics, alpha, gamma)
+
+    # create folder for intermediate results
+    result_dir = os.path.join(
+        root_dir,
+        f"ldamodel_topics{topics}_alpha{alpha}_gamma{gamma}_iterations{iterations}_seed{seed}",
+    )
+    # skip if folder exists
+    # if os.path.exists(result_dir):
+    #     print(f"Skipping {result_dir}")
+    #     return
+
+    os.makedirs(result_dir, exist_ok=True)
+    model.save(os.path.join(result_dir, f"model_0.pickle"))
+
+    perplexities = []
+
+    # run iterations
+    start_time = time.time()
+    for it in range(1, iterations + 1):
+        model.step()
+
+        if it % save_each == 0:
+            H = model.entropy_data(model.flat_docs, model.docs_lengths, model.c_d)
+            PP = 2**H
+            perplexities.append((it, PP))
+            print("Iteration", it, end=", ")
+            print(f"PP={PP}", end=", ")
+            print(f"Time={round(time.time() - start_time, 2)}")
+            start_time = time.time()
+            model.save(os.path.join(result_dir, f"model_{it}.pickle"))
+
+    return perplexities, model
 
 
 def main():
