@@ -259,6 +259,8 @@ class LDATopicModel:
                 w = docs[word_idx]
 
                 KalphaN_d = topics * alpha + N_d
+                # if word_idx == 9582:
+                #     print(f"k\tc_d[d][k]\tc_w[w][k]\tc[k]\t\tp")
                 for k in range(topics):
                     word_probs[word_idx] += (
                         (alpha + c_d[d][k])
@@ -266,11 +268,17 @@ class LDATopicModel:
                         * (gamma + c_w[w][k])
                         / (Mgamma + c[k])
                     )
+                    # if word_idx == 9582:
+                    #     print(
+                    #         f"{k}\t{c_d[d][k]}\t\t{c_w[w][k]}\t\t{c[k]}\t\t{word_probs[word_idx]}"
+                    #     )
+                # if word_idx == 9582:
+                #     return
                 word_idx += 1
 
         H = -np.sum(np.log2(word_probs)) / N_test
 
-        return H
+        return H #, word_probs
 
     def entropy_data(self, flat_docs, docs_lengths, c_d):
         H = LDATopicModel._entropy_data(
